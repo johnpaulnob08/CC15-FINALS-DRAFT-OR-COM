@@ -1,0 +1,3011 @@
+import sys
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QLabel, QLineEdit, QPushButton, QMainWindow,
+    QVBoxLayout, QHBoxLayout, QMessageBox, QComboBox,
+    QInputDialog, QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QStackedWidget,
+    QHeaderView
+)
+from PyQt6.QtCore import Qt
+import mysql.connector
+from mysql.connector import Error
+import bcrypt
+from config import verify_role_password
+import re
+
+def collect_validation_errors(password=None, confirm_password=None, username_exists=False, current_password_incorrect=False):
+    """Collect all validation errors into a single list."""
+    errors = []
+    
+    if password:
+        if len(password) < 8:
+            errors.append("- Password must be at least 8 characters long")
+        if not re.search(r"[A-Z]", password):
+            errors.append("- Password must contain at least one uppercase letter")
+        if not re.search(r"[a-z]", password):
+            errors.append("- Password must contain at least one lowercase letter")
+        if not re.search(r"\d", password):
+            errors.append("- Password must contain at least one number")
+        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+            errors.append("- Password must contain at least one special character")
+    
+    if confirm_password is not None and password != confirm_password:
+        errors.append("- Passwords do not match")
+    
+    if username_exists:
+        errors.append("- Username already exists")
+        
+    if current_password_incorrect:
+        errors.append("- Current password is incorrect")
+    
+    return errors
+
+def show_validation_errors(parent, errors, title="Validation Error"):
+    """Display all validation errors in a single message box."""
+    if errors:
+        error_message = "Please fix the following errors:\n\n" + "\n".join(errors)
+        QMessageBox.warning(parent, title, error_message)
+        return True
+    return False
+
+def validate_password(password):
+    """
+    Validate password strength.
+    Returns (bool, list) tuple - (is_valid, error_list)
+    """
+    errors = collect_validation_errors(password=password)
+    return not bool(errors), errors
+
+
+def connect_to_database(parent=None):
+    try:
+        connection_params = {
+            "host": "localhost",
+            "user": "root",
+            "password": "",
+            "database": "users",
+            "port": 3306,
+            "use_pure": True  # Use pure Python implementation
+        }
+
+        try:
+            connection = mysql.connector.connect(**connection_params)
+
+            if connection.is_connected():
+                cursor = connection.cursor()
+                cursor.execute("SELECT VERSION()")
+                db_version = cursor.fetchone()
+                cursor.close()
+                return connection
+
+        except Error as e:
+            error_msg = f"Database connection error: {str(e)}"
+            if parent:
+                QMessageBox.critical(parent, "Database Error", error_msg)
+            return None
+
+    except Exception as e:
+        error_msg = f"Unexpected error: {str(e)}"
+        if parent:
+            QMessageBox.critical(parent, "Error", error_msg)
+        return None
+
+
+def execute_query(parent, query, params=None):
+    connection = connect_to_database(parent)
+    if connection:
+        try:
+            cursor = connection.cursor()
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            connection.commit()
+            return True
+        except Error as e:
+            QMessageBox.critical(parent, "Error", f"Database error: {e}")
+            return False
+        finally:
+            cursor.close()
+            connection.close()
+    return False
+
+
+# --- Welcome Window ---
+class WelcomeWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Organization Profiling System")
+        self.setGeometry(100, 100, 400, 200)
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Main layout
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Title
+        title = QLabel("Welcome to the Organization Profiling System")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        # Form layout for inputs
+        form_layout = QFormLayout()
+
+        # Username input
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Username")
+        form_layout.addRow("Username:", self.username_input)
+
+        # Password input with show/hide toggle
+        password_layout = QHBoxLayout()
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Password")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        password_layout.addWidget(self.password_input)
+        
+        # Toggle password visibility button
+        self.toggle_password_btn = QPushButton("Show")
+        self.toggle_password_btn.setFixedWidth(60)
+        self.toggle_password_btn.clicked.connect(self.toggle_password_visibility)
+        password_layout.addWidget(self.toggle_password_btn)
+        
+        form_layout.addRow("Password:", password_layout)
+
+        layout.addLayout(form_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        login_button = QPushButton("Login")
+        login_button.clicked.connect(self.login)
+        button_layout.addWidget(login_button)
+
+        register_button = QPushButton("Register")
+        register_button.clicked.connect(self.open_register_window)
+        button_layout.addWidget(register_button)
+
+        layout.addLayout(button_layout)
+
+    def toggle_password_visibility(self):
+        if self.password_input.echoMode() == QLineEdit.EchoMode.Password:
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.toggle_password_btn.setText("Hide")
+        else:
+            self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.toggle_password_btn.setText("Show")
+
+    def login(self):
+        try:
+            username = self.username_input.text().strip()
+            password = self.password_input.text()
+
+            if not username or not password:
+                QMessageBox.warning(self, "Login Failed", "Please enter both username and password.")
+                return
+
+            connection = connect_to_database(self)
+            if not connection:
+                return
+
+            try:
+                cursor = connection.cursor(buffered=True)
+
+                # Check account exists and get credentials
+                query = """SELECT user_id, password, role, status
+                          FROM accounts
+                          WHERE username = %s"""
+                cursor.execute(query, (username,))
+                result = cursor.fetchone()
+
+                if not result:
+                    QMessageBox.warning(self, "Login Failed", "Invalid username or password.")
+                    return
+
+                user_id, stored_hash, role, status = result
+
+                if status == 'Pending':
+                    QMessageBox.warning(self, "Login Failed",
+                                        "Account is pending approval. Please wait for executive or administrator confirmation.")
+                    return
+
+                if status == 'Inactive':
+                    QMessageBox.warning(self, "Login Failed",
+                                        "Account has been set as inactive. Please contact executive or administrator.")
+                    return
+
+                # Verify password
+                if not bcrypt.checkpw(password.encode(), stored_hash.encode()):
+                    QMessageBox.warning(self, "Login Failed", "Invalid username or password.")
+                    return
+
+                # Update last login
+                cursor.execute("""UPDATE accounts 
+                                SET last_login = CURRENT_TIMESTAMP 
+                                WHERE user_id = %s""", (user_id,))
+                connection.commit()
+
+                # Create appropriate dashboard
+                dashboard = None
+                if role == "Admin":
+                    dashboard = AdminDashboard(username)
+                elif role == "Executive":
+                    dashboard = ExecutiveDashboard(username)
+                elif role == "Member":
+                    dashboard = MemberDashboard(username)
+                else:
+                    raise ValueError(f"Unknown role: {role}")
+
+                if dashboard:
+                    dashboard.show()
+                    self.hide()
+
+            except Exception as e:
+                connection.rollback()
+                error_msg = f"Error during login: {str(e)}"
+                QMessageBox.critical(self, "Error", error_msg)
+            finally:
+                cursor.close()
+                connection.close()
+
+        except Exception as e:
+            error_msg = f"Unexpected error during login: {str(e)}"
+            QMessageBox.critical(self, "Error", error_msg)
+
+    def open_register_window(self):
+        try:
+            self.register_window = RegisterWindow(self)
+            self.register_window.show()
+            self.hide()
+        except Exception as e:
+            error_msg = f"Error opening register window: {str(e)}"
+            QMessageBox.critical(self, "Error", error_msg)
+
+
+# --- Register Window ---
+class RegisterWindow(QWidget):
+    def __init__(self, welcome_window):
+        super().__init__()
+        self.welcome_window = welcome_window
+        self.setWindowTitle("Register")
+        self.setGeometry(100, 100, 400, 400)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Form layout for inputs
+        form_layout = QFormLayout()
+
+        # Create input fields
+        self.fields = {
+            'first_name': QLineEdit(),
+            'middle_name': QLineEdit(),
+            'last_name': QLineEdit(),
+            'username': QLineEdit(),
+            'password': QLineEdit(),
+            'confirm_password': QLineEdit()
+        }
+
+        # Set up password fields
+        self.fields['password'].setEchoMode(QLineEdit.EchoMode.Password)
+        self.fields['confirm_password'].setEchoMode(QLineEdit.EchoMode.Password)
+
+        # Add placeholders
+        self.fields['first_name'].setPlaceholderText("First Name (All Caps)")
+        self.fields['middle_name'].setPlaceholderText("Middle Name (All Caps)")
+        self.fields['last_name'].setPlaceholderText("Last Name (All Caps)")
+        self.fields['username'].setPlaceholderText("Username")
+        self.fields['password'].setPlaceholderText("Password")
+        self.fields['confirm_password'].setPlaceholderText("Confirm Password")
+
+        # Add fields to form layout
+        form_layout.addRow("First Name:", self.fields['first_name'])
+        form_layout.addRow("Middle Name:", self.fields['middle_name'])
+        form_layout.addRow("Last Name:", self.fields['last_name'])
+        form_layout.addRow("Username:", self.fields['username'])
+
+        # Password field with show/hide toggle
+        password_layout = QHBoxLayout()
+        password_layout.addWidget(self.fields['password'])
+        self.toggle_password_btn = QPushButton("Show")
+        self.toggle_password_btn.setFixedWidth(60)
+        self.toggle_password_btn.clicked.connect(lambda: self.toggle_password_visibility('password'))
+        password_layout.addWidget(self.toggle_password_btn)
+        form_layout.addRow("Password:", password_layout)
+
+        # Password requirements label
+        self.password_requirements = QLabel(
+            "Password must contain:\n"
+            "- At least 8 characters\n"
+            "- At least one uppercase letter\n"
+            "- At least one lowercase letter\n"
+            "- At least one number\n"
+            "- At least one special character"
+        )
+        self.password_requirements.setStyleSheet("color: gray; font-size: 10px;")
+        form_layout.addRow("", self.password_requirements)
+
+        # Confirm password field with show/hide toggle
+        confirm_layout = QHBoxLayout()
+        confirm_layout.addWidget(self.fields['confirm_password'])
+        self.toggle_confirm_btn = QPushButton("Show")
+        self.toggle_confirm_btn.setFixedWidth(60)
+        self.toggle_confirm_btn.clicked.connect(lambda: self.toggle_password_visibility('confirm_password'))
+        confirm_layout.addWidget(self.toggle_confirm_btn)
+        form_layout.addRow("Confirm Password:", confirm_layout)
+
+        # Role selection
+        self.role_box = QComboBox()
+        self.role_box.addItems(["Member", "Executive", "Admin"])
+        form_layout.addRow("Role:", self.role_box)
+
+        layout.addLayout(form_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        register_btn = QPushButton("Register")
+        register_btn.clicked.connect(self.register_account)
+        button_layout.addWidget(register_btn)
+
+        back_btn = QPushButton("Back")
+        back_btn.clicked.connect(self.go_back)
+        button_layout.addWidget(back_btn)
+
+        layout.addLayout(button_layout)
+
+    def toggle_password_visibility(self, field_name):
+        field = self.fields[field_name]
+        toggle_btn = self.toggle_password_btn if field_name == 'password' else self.toggle_confirm_btn
+        
+        if field.echoMode() == QLineEdit.EchoMode.Password:
+            field.setEchoMode(QLineEdit.EchoMode.Normal)
+            toggle_btn.setText("Hide")
+        else:
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            toggle_btn.setText("Show")
+
+    def register_account(self):
+        try:
+            # Get field values
+            fn = self.fields['first_name'].text().strip()
+            mn = self.fields['middle_name'].text().strip()
+            ln = self.fields['last_name'].text().strip()
+            un = self.fields['username'].text().strip()
+            pw = self.fields['password'].text()
+            cpw = self.fields['confirm_password'].text()
+            role = self.role_box.currentText()
+            
+            # Collect all validation errors
+            errors = []
+            
+            # Check required fields
+            if not all([fn, mn, ln, un, pw, cpw]):
+                errors.append("- All fields are required")
+            
+            # Check names are in caps
+            if not (fn.isupper() and mn.isupper() and ln.isupper()):
+                errors.append("- Names must be in ALL CAPS")
+            
+            # Password validation
+            _, password_errors = validate_password(pw)
+            errors.extend(password_errors)
+            
+            # Check passwords match
+            if pw != cpw:
+                errors.append("- Passwords do not match")
+            
+            # Check username availability
+            connection = connect_to_database(self)
+            if connection:
+                cursor = connection.cursor()
+                cursor.execute("SELECT user_id FROM accounts WHERE username = %s", (un,))
+                if cursor.fetchone():
+                    errors.append("- Username already exists")
+                cursor.close()
+                connection.close()
+            
+            # Show all errors if any
+            if show_validation_errors(self, errors, "Registration Error"):
+                return
+            
+            # Continue with registration if no errors...
+            # [Rest of the registration code remains the same]
+
+            # Role password verification
+            input_password, ok = QInputDialog.getText(
+                self, "Role Password",
+                f"Enter {role} role password:",
+                QLineEdit.EchoMode.Password
+            )
+
+            if not ok:
+                return
+
+            if not verify_role_password(role, input_password):
+                QMessageBox.warning(self, "Incorrect Password", "Incorrect role-specific password.")
+                return
+
+            # Hash password
+            hashed_password = bcrypt.hashpw(pw.encode(), bcrypt.gensalt())
+
+            connection = connect_to_database(self)
+            if not connection:
+                return
+
+            try:
+                cursor = connection.cursor()
+                connection.start_transaction()
+
+                # Check if username exists
+                cursor.execute("SELECT user_id FROM accounts WHERE username = %s", (un,))
+                if cursor.fetchone():
+                    QMessageBox.warning(self, "Registration Failed", "Username already exists!")
+                    return
+
+                # Insert into accounts table
+                if role == "Admin":
+                    account_query = """INSERT INTO accounts (username, password, role, status) 
+                                    VALUES (%s, %s, %s, 'Active')"""
+                else:
+                    account_query = """INSERT INTO accounts (username, password, role, status) 
+                                    VALUES (%s, %s, %s, 'Pending')"""
+
+                cursor.execute(account_query, (un, hashed_password, role))
+                user_id = cursor.lastrowid
+
+                # Insert into profiles table
+                profile_query = """INSERT INTO profiles 
+                    (user_id, first_name, middle_name, last_name) 
+                    VALUES (%s, %s, %s, %s)"""
+                cursor.execute(profile_query, (user_id, fn, mn, ln))
+
+                # Create confirmation request for non-admin accounts
+                if role != "Admin":
+                    request_query = """INSERT INTO confirmation_requests 
+                        (user_id, request_type, requested_by, status) 
+                        VALUES (%s, 'Registration', %s, 'Pending')"""
+                    cursor.execute(request_query, (user_id, user_id))
+
+                connection.commit()
+                QMessageBox.information(
+                    self, "Success",
+                    "Registration complete! Waiting for approval." if role != "Admin"
+                    else "Registration complete!"
+                )
+                self.go_back()
+
+            except mysql.connector.Error as e:
+                connection.rollback()
+                error_msg = f"Registration error: {str(e)}"
+                print(error_msg)  # Debug print
+                QMessageBox.critical(self, "Error", error_msg)
+            finally:
+                cursor.close()
+                connection.close()
+
+        except Exception as e:
+            error_msg = f"Unexpected error during registration: {str(e)}"
+            print(error_msg)  # Debug print
+            QMessageBox.critical(self, "Error", error_msg)
+
+    def go_back(self):
+        self.welcome_window.show()
+        self.close()
+
+
+class BaseDashboard(QMainWindow):
+    def __init__(self, username, role):
+        super().__init__()
+        self.username = username
+        self.role = role
+        self.user_id = self.get_user_id()
+
+    def setup_main_area(self):
+        """Setup the main content area below menu bar"""
+        self.main_content = QStackedWidget()
+        self.setCentralWidget(self.main_content)
+
+        # Create default welcome page
+        welcome_page = QWidget()
+        welcome_layout = QVBoxLayout()
+        welcome_label = QLabel(f"Welcome {self.role} {self.username}")
+        welcome_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        welcome_layout.addWidget(welcome_label)
+        welcome_page.setLayout(welcome_layout)
+
+        self.main_content.addWidget(welcome_page)
+
+    def show_table_in_main(self, table_widget, title):
+        """Display a table in the main content area"""
+        page = QWidget()
+        layout = QVBoxLayout()
+
+        # Add title and back button
+        header_layout = QHBoxLayout()
+        title_label = QLabel(title)
+        back_btn = QPushButton("Back to Dashboard")
+        back_btn.clicked.connect(lambda: self.main_content.setCurrentIndex(0))
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(back_btn)
+        layout.addLayout(header_layout)
+
+        # Add table
+        layout.addWidget(table_widget)
+        page.setLayout(layout)
+
+        self.main_content.addWidget(page)
+        self.main_content.setCurrentWidget(page)
+
+    def get_user_id(self):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                query = "SELECT user_id FROM accounts WHERE username = %s"
+                cursor.execute(query, (self.username,))
+                result = cursor.fetchone()
+                return result[0] if result else None
+            finally:
+                cursor.close()
+                connection.close()
+
+    def logout(self):
+        self.welcome_window = WelcomeWindow()
+        self.welcome_window.show()
+        self.close()
+
+    def view_profile(self):
+        profile_window = QDialog(self)
+        profile_window.setWindowTitle("Profile View")
+        profile_window.setGeometry(150, 150, 500, 400)
+        layout = QVBoxLayout()
+
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT p.*, a.username, a.role 
+                    FROM profiles p
+                    JOIN accounts a ON p.user_id = a.user_id
+                    WHERE a.username = %s
+                """
+                cursor.execute(query, (self.username,))
+                profile = cursor.fetchone()
+
+                if profile:
+                    form = QFormLayout()
+                    for field, value in profile.items():
+                        if field not in ['user_id', 'profile_id']:
+                            label = QLabel(str(value))
+                            form.addRow(f"{field.replace('_', ' ').title()}:", label)
+                    layout.addLayout(form)
+            finally:
+                cursor.close()
+                connection.close()
+
+        profile_window.setLayout(layout)
+        profile_window.exec()
+
+    def edit_account(self, profile_id):
+        edit_window = QDialog(self)
+        edit_window.setWindowTitle("Edit Account")
+        layout = QFormLayout()
+
+        # Get current account data
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT a.username, a.password, p.user_id
+                    FROM accounts a
+                    JOIN profiles p ON a.user_id = p.user_id
+                    WHERE p.profile_id = %s
+                """
+                cursor.execute(query, (profile_id,))
+                account = cursor.fetchone()
+
+                if account:
+                    # Username field
+                    username_input = QLineEdit(account['username'])
+                    layout.addRow("Username:", username_input)
+
+                    # Current password field with show/hide toggle
+                    current_pass_layout = QHBoxLayout()
+                    current_password = QLineEdit()
+                    current_password.setEchoMode(QLineEdit.EchoMode.Password)
+                    current_password.setPlaceholderText("Enter current password")
+                    current_pass_layout.addWidget(current_password)
+                    
+                    toggle_current_btn = QPushButton("Show")
+                    toggle_current_btn.setFixedWidth(60)
+                    toggle_current_btn.clicked.connect(lambda: self.toggle_password_field(current_password, toggle_current_btn))
+                    current_pass_layout.addWidget(toggle_current_btn)
+                    layout.addRow("Current Password:", current_pass_layout)
+
+                    # New password field with show/hide toggle
+                    new_pass_layout = QHBoxLayout()
+                    new_password = QLineEdit()
+                    new_password.setEchoMode(QLineEdit.EchoMode.Password)
+                    new_password.setPlaceholderText("Leave blank to keep current password")
+                    new_pass_layout.addWidget(new_password)
+                    
+                    toggle_new_btn = QPushButton("Show")
+                    toggle_new_btn.setFixedWidth(60)
+                    toggle_new_btn.clicked.connect(lambda: self.toggle_password_field(new_password, toggle_new_btn))
+                    new_pass_layout.addWidget(toggle_new_btn)
+                    layout.addRow("New Password:", new_pass_layout)
+
+                    # Password requirements label
+                    password_requirements = QLabel(
+                        "Password must contain:\n"
+                        "- At least 8 characters\n"
+                        "- At least one uppercase letter\n"
+                        "- At least one lowercase letter\n"
+                        "- At least one number\n"
+                        "- At least one special character"
+                    )
+                    password_requirements.setStyleSheet("color: gray; font-size: 10px;")
+                    layout.addRow("", password_requirements)
+
+                    # Confirm password field with show/hide toggle
+                    confirm_pass_layout = QHBoxLayout()
+                    confirm_password = QLineEdit()
+                    confirm_password.setEchoMode(QLineEdit.EchoMode.Password)
+                    confirm_password.setPlaceholderText("Confirm new password")
+                    confirm_pass_layout.addWidget(confirm_password)
+                    
+                    toggle_confirm_btn = QPushButton("Show")
+                    toggle_confirm_btn.setFixedWidth(60)
+                    toggle_confirm_btn.clicked.connect(lambda: self.toggle_password_field(confirm_password, toggle_confirm_btn))
+                    confirm_pass_layout.addWidget(toggle_confirm_btn)
+                    layout.addRow("Confirm Password:", confirm_pass_layout)
+
+                    def save_account_changes():
+                        # Collect all validation errors
+                        errors = []
+                        
+                        # Verify current password
+                        if not bcrypt.checkpw(current_password.text().encode(), account['password'].encode()):
+                            errors.append("- Current password is incorrect")
+                        
+                        # Validate new password if provided
+                        if new_password.text():
+                            _, password_errors = validate_password(new_password.text())
+                            errors.extend(password_errors)
+                            
+                            # Check if new passwords match
+                            if new_password.text() != confirm_password.text():
+                                errors.append("- New passwords do not match")
+                        
+                        # Check username if changed
+                        if username_input.text() != account['username']:
+                            cursor = connection.cursor()
+                            cursor.execute("SELECT user_id FROM accounts WHERE username = %s",
+                                           (username_input.text(),))
+                            if cursor.fetchone():
+                                errors.append("- Username already exists")
+                            cursor.close()
+                        
+                        # Show all errors if any
+                        if show_validation_errors(edit_window, errors):
+                            return
+                        
+                        try:
+                            connection = connect_to_database(self)
+                            cursor = connection.cursor()
+                            
+                            # Update username if changed
+                            if username_input.text() != account['username']:
+                                cursor.execute("UPDATE accounts SET username = %s WHERE user_id = %s",
+                                               (username_input.text(), account['user_id']))
+                            
+                            # Update password if provided
+                            if new_password.text():
+                                hashed_password = bcrypt.hashpw(new_password.text().encode(), bcrypt.gensalt())
+                                cursor.execute("UPDATE accounts SET password = %s WHERE user_id = %s",
+                                               (hashed_password, account['user_id']))
+                            
+                            connection.commit()
+                            QMessageBox.information(edit_window, "Success", "Account updated successfully")
+                            edit_window.accept()
+                            
+                        except mysql.connector.Error as e:
+                            connection.rollback()
+                            QMessageBox.critical(edit_window, "Error", f"Database error: {str(e)}")
+                        finally:
+                            cursor.close()
+                            connection.close()
+
+                    # Save button
+                    save_btn = QPushButton("Save Changes")
+                    save_btn.clicked.connect(save_account_changes)
+                    layout.addWidget(save_btn)
+
+            finally:
+                cursor.close()
+                connection.close()
+
+        edit_window.setLayout(layout)
+        edit_window.exec()
+
+    def toggle_password_field(self, field, toggle_btn):
+        if field.echoMode() == QLineEdit.EchoMode.Password:
+            field.setEchoMode(QLineEdit.EchoMode.Normal)
+            toggle_btn.setText("Hide")
+        else:
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            toggle_btn.setText("Show")
+
+    def edit_information(self, profile_id):
+        edit_window = QDialog(self)
+        edit_window.setWindowTitle("Edit Information")
+        layout = QFormLayout()
+
+        # Get current profile data
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT *
+                    FROM profiles
+                    WHERE profile_id = %s
+                """
+                cursor.execute(query, (profile_id,))
+                profile = cursor.fetchone()
+
+                if profile:
+                    # Create input fields
+                    fields = {
+                        'first_name': QLineEdit(profile['first_name']),
+                        'middle_name': QLineEdit(profile['middle_name']),
+                        'last_name': QLineEdit(profile['last_name']),
+                        'email': QLineEdit(profile.get('email', '')),
+                        'contact_number': QLineEdit(profile.get('contact_number', '')),
+                        'department': QLineEdit(profile.get('department', '')),
+                        'position': QLineEdit(profile.get('position', ''))
+                    }
+
+                    # Add fields to layout
+                    for key, field in fields.items():
+                        layout.addRow(f"{key.replace('_', ' ').title()}:", field)
+
+                    def save_information_changes():
+                        try:
+                            connection = connect_to_database(self)
+                            cursor = connection.cursor()
+
+                            # Update profile information
+                            query = """
+                                UPDATE profiles 
+                                SET first_name = %s, middle_name = %s, last_name = %s,
+                                    email = %s, contact_number = %s, department = %s,
+                                    position = %s
+                                WHERE profile_id = %s
+                            """
+                            cursor.execute(query, (
+                                fields['first_name'].text().upper(),
+                                fields['middle_name'].text().upper(),
+                                fields['last_name'].text().upper(),
+                                fields['email'].text(),
+                                fields['contact_number'].text(),
+                                fields['department'].text(),
+                                fields['position'].text(),
+                                profile_id
+                            ))
+
+                            connection.commit()
+                            QMessageBox.information(edit_window, "Success",
+                                                    "Information updated successfully!")
+                            edit_window.accept()
+
+                        except mysql.connector.Error as e:
+                            QMessageBox.critical(edit_window, "Error", f"Database error: {str(e)}")
+                        finally:
+                            if connection:
+                                connection.close()
+
+                    # Save button
+                    save_btn = QPushButton("Save Changes")
+                    save_btn.clicked.connect(save_information_changes)
+                    layout.addWidget(save_btn)
+
+            finally:
+                cursor.close()
+                connection.close()
+
+        edit_window.setLayout(layout)
+        edit_window.exec()
+
+    def save_profile_changes(self, profile_id, fields):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                query = """UPDATE profiles 
+                          SET first_name = %s, middle_name = %s, last_name = %s
+                          WHERE profile_id = %s"""
+                cursor.execute(query, (
+                    fields['first_name'].text().upper(),
+                    fields['middle_name'].text().upper(),
+                    fields['last_name'].text().upper(),
+                    profile_id
+                ))
+                connection.commit()
+                QMessageBox.information(self, "Success", "Profile updated successfully")
+            finally:
+                cursor.close()
+                connection.close()
+
+    def get_profile_id(self):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                query = """
+                    SELECT profile_id 
+                    FROM profiles 
+                    WHERE user_id = (
+                        SELECT user_id 
+                        FROM accounts 
+                        WHERE username = %s
+                    )
+                """
+                cursor.execute(query, (self.username,))
+                result = cursor.fetchone()
+                return result[0] if result else None
+            finally:
+                cursor.close()
+                connection.close()
+
+    def view_active_users(self):
+        # Create container widget for search and table
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Add search functionality
+        search_layout = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search by name or username...")
+        search_btn = QPushButton("Search")
+        search_layout.addWidget(search_input)
+        search_layout.addWidget(search_btn)
+        layout.addLayout(search_layout)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["Name", "Username", "Role", "Status"])
+
+        def load_users(search_term=""):
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.first_name, p.middle_name, p.last_name,
+                            a.username, a.role, a.status
+                        FROM profiles p
+                        JOIN accounts a ON p.user_id = a.user_id
+                        WHERE a.status = 'Active'
+                        AND a.role != 'Admin'
+                        AND (
+                            CONCAT(p.first_name, ' ', p.middle_name, ' ', p.last_name) LIKE %s
+                            OR a.username LIKE %s
+                        )
+                        ORDER BY p.last_name, p.first_name
+                    """
+                    search_pattern = f"%{search_term}%" if search_term else "%"
+                    cursor.execute(query, (search_pattern, search_pattern))
+                    users = cursor.fetchall()
+
+                    table.setRowCount(len(users))
+                    for i, user in enumerate(users):
+                        full_name = f"{user[0]} {user[1]} {user[2]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(user[3]))
+                        table.setItem(i, 2, QTableWidgetItem(user[4]))
+                        table.setItem(i, 3, QTableWidgetItem(user[5]))
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Connect search button and Enter key
+        search_btn.clicked.connect(lambda: load_users(search_input.text()))
+        search_input.returnPressed.connect(lambda: load_users(search_input.text()))
+
+        # Add table to layout and perform initial load
+        layout.addWidget(table)
+        load_users()
+
+        # Show in main area
+        self.show_table_in_main(container, "Active Users")
+
+    def request_deletion(self):
+        reply = QMessageBox.question(
+            self, 'Confirm Deletion Request',
+            'Are you sure you want to request account deletion? This action cannot be undone once approved.\nYou will be logged out after submitting the request.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if there's already a pending deletion request
+                    cursor.execute("""
+                        SELECT request_id FROM confirmation_requests 
+                        WHERE user_id = %s AND request_type = 'Deletion' 
+                        AND status = 'Pending'
+                    """, (self.user_id,))
+
+                    if cursor.fetchone():
+                        QMessageBox.warning(
+                            self, "Request Exists",
+                            "You already have a pending deletion request.")
+                        return
+
+                    # Create new deletion request
+                    cursor.execute("""
+                        INSERT INTO confirmation_requests 
+                        (user_id, request_type, requested_by, status)
+                        VALUES (%s, 'Deletion', %s, 'Pending')
+                    """, (self.user_id, self.user_id))
+
+                    # Update account status to 'Inactive'
+                    cursor.execute("""
+                        UPDATE accounts 
+                        SET status = 'Inactive'
+                        WHERE user_id = %s
+                    """, (self.user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(
+                        self, "Success",
+                        "Deletion request submitted. You will now be logged out.")
+
+                    # Log out the user
+                    self.logout()
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error submitting deletion request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+
+class AdminDashboard(BaseDashboard):
+    def __init__(self, username):
+        super().__init__(username, "Admin")
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle("Admin Dashboard")
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout()
+        central_widget.setLayout(layout)
+
+        welcome_label = QLabel(f"Welcome Admin {self.username}")
+        layout.addWidget(welcome_label)
+
+        # Create menu bar
+        menubar = self.menuBar()
+
+        # Profile Menu
+        profile_menu = menubar.addMenu("Profile")
+        view_profile = profile_menu.addAction("My Profile")
+        view_profile.triggered.connect(self.view_profile)
+
+        edit_menu = profile_menu.addMenu("Edit")
+        edit_account = edit_menu.addAction("Account Settings")
+        edit_account.triggered.connect(lambda: self.edit_account(self.get_profile_id()))
+        edit_information = edit_menu.addAction("Personal Information")
+        edit_information.triggered.connect(lambda: self.edit_information(self.get_profile_id()))
+
+        # Account Management Menu
+        account_menu = menubar.addMenu("Account Management")
+        create_account = account_menu.addAction("Create Account")
+        create_account.triggered.connect(self.create_account)
+        pending_reg = account_menu.addAction("Pending Registrations")
+        pending_reg.triggered.connect(self.view_pending_registrations)
+        deletion_req = account_menu.addAction("Deletion Requests")
+        deletion_req.triggered.connect(self.view_deletion_requests)
+
+        # User Management Menu
+        user_menu = menubar.addMenu("User Management")
+        manage_users = user_menu.addAction("Manage Users")
+        manage_users.triggered.connect(self.manage_users)
+
+        # System Menu
+        system_menu = menubar.addMenu("System")
+        view_logs = system_menu.addAction("View System Logs")
+        view_logs.triggered.connect(self.view_logs)
+
+        # Logout Menu
+        logout_menu = menubar.addMenu("Account")
+        logout_action = logout_menu.addAction("Logout")
+        logout_action.triggered.connect(self.logout)
+
+        self.setup_main_area()
+
+    def view_logs(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Add title and search functionality
+        header_layout = QHBoxLayout()
+        title = QLabel("System Logs")
+        title.setStyleSheet("font-size: 14pt; font-weight: bold;")
+        header_layout.addWidget(title)
+
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search logs...")
+        search_btn = QPushButton("Search")
+        header_layout.addWidget(search_input)
+        header_layout.addWidget(search_btn)
+        layout.addLayout(header_layout)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(["Timestamp", "User", "Action", "Details", "Status"])
+
+        # Set table properties for better display
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.setAlternatingRowColors(True)
+
+        def load_logs(search_term=""):
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    if search_term:
+                        query = """
+                            SELECT l.timestamp, a.username, l.action, l.details, l.status
+                            FROM system_logs l
+                            LEFT JOIN accounts a ON l.user_id = a.user_id
+                            WHERE l.action LIKE %s 
+                            OR l.details LIKE %s 
+                            OR a.username LIKE %s
+                            OR l.status LIKE %s
+                            ORDER BY l.timestamp DESC
+                            LIMIT 1000
+                        """
+                        search_pattern = f"%{search_term}%"
+                        cursor.execute(query, (search_pattern, search_pattern, search_pattern, search_pattern))
+                    else:
+                        query = """
+                            SELECT l.timestamp, a.username, l.action, l.details, l.status
+                            FROM system_logs l
+                            LEFT JOIN accounts a ON l.user_id = a.user_id
+                            ORDER BY l.timestamp DESC
+                            LIMIT 1000
+                        """
+                        cursor.execute(query)
+
+                    logs = cursor.fetchall()
+                    table.setRowCount(len(logs))
+
+                    for i, log in enumerate(logs):
+                        for j, value in enumerate(log):
+                            item = QTableWidgetItem(str(value) if value else "System")
+                            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # Make cells read-only
+                            table.setItem(i, j, item)
+
+                    # Adjust column widths
+                    table.resizeColumnsToContents()
+
+                except mysql.connector.Error as e:
+                    QMessageBox.critical(self, "Error", f"Error loading logs: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Connect search functionality
+        search_btn.clicked.connect(lambda: load_logs(search_input.text()))
+        search_input.returnPressed.connect(lambda: load_logs(search_input.text()))
+
+        # Add refresh button
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(lambda: load_logs())
+        header_layout.addWidget(refresh_btn)
+
+        # Add table to layout
+        layout.addWidget(table)
+
+        # Initial load of logs
+        load_logs()
+
+        # Show in main area
+        self.show_table_in_main(container, "System Logs")
+
+    def manage_users(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Add search bar layout
+        search_layout = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search by name or username...")
+        search_btn = QPushButton("Search")
+        search_layout.addWidget(search_input)
+        search_layout.addWidget(search_btn)
+        layout.addLayout(search_layout)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Department", "Position", "Status", "Actions"
+        ])
+        layout.addWidget(table)
+
+        def load_users(search_term=""):
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.user_id, p.first_name, p.middle_name, p.last_name,
+                            a.username, p.department, p.position, a.status
+                        FROM profiles p
+                        JOIN accounts a ON p.user_id = a.user_id
+                        WHERE a.role != 'Admin' AND (
+                            CONCAT(p.first_name, ' ', p.middle_name, ' ', p.last_name) LIKE %s
+                            OR a.username LIKE %s
+                        )
+                        ORDER BY p.last_name
+                    """
+                    search_pattern = f"%{search_term}%" if search_term else "%"
+                    cursor.execute(query, (search_pattern, search_pattern))
+                    users = cursor.fetchall()
+
+                    table.setRowCount(len(users))
+                    for i, user in enumerate(users):
+                        user_id = user[0]
+                        full_name = f"{user[1]} {user[2]} {user[3]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(user[4]))
+                        table.setItem(i, 2, QTableWidgetItem(user[5] if user[5] else "Not Set"))
+                        table.setItem(i, 3, QTableWidgetItem(user[6] if user[6] else "Not Set"))
+                        table.setItem(i, 4, QTableWidgetItem(user[7]))
+
+                        # Edit Button
+                        action_widget = QWidget()
+                        action_layout = QHBoxLayout()
+                        action_layout.setContentsMargins(0, 0, 0, 0)
+
+                        edit_btn = QPushButton("Edit")
+                        edit_btn.clicked.connect(lambda _, uid=user_id: self.edit_user_profile(uid))
+
+                        action_layout.addWidget(edit_btn)
+                        action_widget.setLayout(action_layout)
+                        table.setCellWidget(i, 5, action_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Connect search functionality
+        search_btn.clicked.connect(lambda: load_users(search_input.text()))
+
+        # Initial load
+        load_users()
+
+        # Show table in main area
+        self.show_table_in_main(container, "Manage Users")
+
+    def edit_user_profile(self, user_id):
+        # Create container for editing profile
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        form_layout = QFormLayout()
+
+        # Get current profile data
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT p.*, a.username, a.status
+                    FROM profiles p
+                    JOIN accounts a ON p.user_id = a.user_id
+                    WHERE p.user_id = %s
+                """
+                cursor.execute(query, (user_id,))
+                profile = cursor.fetchone()
+
+                if profile:
+                    # Display user's full name and username
+                    full_name = f"{profile['first_name']} {profile['middle_name']} {profile['last_name']}"
+                    form_layout.addRow("Name:", QLabel(full_name))
+                    form_layout.addRow("Username:", QLabel(profile['username']))
+
+                    # Editable fields
+                    department_input = QLineEdit(profile['department'] if profile['department'] else "")
+                    position_input = QLineEdit(profile['position'] if profile['position'] else "")
+
+                    status_box = QComboBox()
+                    status_box.addItems(["Active", "Inactive"])
+                    status_box.setCurrentText(profile['status'])
+
+                    # Add editable fields to layout
+                    form_layout.addRow("Department:", department_input)
+                    form_layout.addRow("Position:", position_input)
+                    form_layout.addRow("Status:", status_box)
+
+                    layout.addLayout(form_layout)
+
+                    # Save button
+                    save_btn = QPushButton("Save Changes")
+                    save_btn.clicked.connect(lambda: self.save_profile_updates(
+                        user_id,
+                        {
+                            'department': department_input,
+                            'position': position_input
+                        },
+                        status_box.currentText()
+                    ))
+                    layout.addWidget(save_btn)
+
+            finally:
+                cursor.close()
+                connection.close()
+
+        # Show in main area
+        self.show_table_in_main(container, "Edit User Profile")
+
+    def save_profile_updates(self, user_id, fields, status):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                # Update profiles for department and position
+                profile_query = """
+                    UPDATE profiles 
+                    SET department = %s, position = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(profile_query, (
+                    fields['department'].text(),
+                    fields['position'].text(),
+                    user_id
+                ))
+
+                # Update accounts for status
+                status_query = """
+                    UPDATE accounts 
+                    SET status = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(status_query, (status, user_id))
+
+                connection.commit()
+                QMessageBox.information(self, "Success", "Profile updated successfully")
+            except mysql.connector.Error as e:
+                QMessageBox.critical(self, "Error", f"Error updating profile: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+
+    def request_deletion(self):
+        reply = QMessageBox.question(
+            self, 'Confirm Deletion Request',
+            'Are you sure you want to request account deletion? This action cannot be undone once approved.\nYou will be logged out after submitting the request.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if there's already a pending deletion request
+                    cursor.execute("""
+                        SELECT request_id FROM confirmation_requests 
+                        WHERE user_id = %s AND request_type = 'Deletion' 
+                        AND status = 'Pending'
+                    """, (self.user_id,))
+
+                    if cursor.fetchone():
+                        QMessageBox.warning(
+                            self, "Request Exists",
+                            "You already have a pending deletion request.")
+                        return
+
+                    # Create new deletion request
+                    cursor.execute("""
+                        INSERT INTO confirmation_requests 
+                        (user_id, request_type, requested_by, status)
+                        VALUES (%s, 'Deletion', %s, 'Pending')
+                    """, (self.user_id, self.user_id))
+
+                    # Update account status to 'Inactive'
+                    cursor.execute("""
+                        UPDATE accounts 
+                        SET status = 'Inactive'
+                        WHERE user_id = %s
+                    """, (self.user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(
+                        self, "Success",
+                        "Deletion request submitted. You will now be logged out.")
+
+                    # Log out the user
+                    self.logout()
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error submitting deletion request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def create_account(self):
+        account_window = QDialog(self)
+        account_window.setWindowTitle("Create Account")
+        layout = QFormLayout()
+
+        # Create input fields
+        fields = {
+            'username': QLineEdit(),
+            'password': QLineEdit(),
+            'first_name': QLineEdit(),
+            'middle_name': QLineEdit(),
+            'last_name': QLineEdit(),
+        }
+        fields['password'].setEchoMode(QLineEdit.EchoMode.Password)
+
+        role_box = QComboBox()
+        role_box.addItems(["Member", "Executive"])
+
+        for key, field in fields.items():
+            layout.addRow(f"{key.replace('_', ' ').title()}:", field)
+        layout.addRow("Role:", role_box)
+
+        create_btn = QPushButton("Create Account")
+        create_btn.clicked.connect(lambda: self.save_new_account(
+            fields, role_box.currentText()))
+        layout.addWidget(create_btn)
+
+        account_window.setLayout(layout)
+        account_window.exec()
+
+    def save_new_account(self, fields, role):
+        # Hash password
+        hashed_password = bcrypt.hashpw(
+            fields['password'].text().encode(), bcrypt.gensalt())
+
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                connection.start_transaction()
+
+                # Insert account
+                account_query = """INSERT INTO accounts (username, password, role, status)
+                                VALUES (%s, %s, %s, 'Active')"""
+                cursor.execute(account_query, (
+                    fields['username'].text(),
+                    hashed_password,
+                    role
+                ))
+                user_id = cursor.lastrowid
+
+                # Insert profile
+                profile_query = """INSERT INTO profiles 
+                    (user_id, first_name, middle_name, last_name)
+                    VALUES (%s, %s, %s, %s)"""
+                cursor.execute(profile_query, (
+                    user_id,
+                    fields['first_name'].text().upper(),
+                    fields['middle_name'].text().upper(),
+                    fields['last_name'].text().upper()
+                ))
+
+                connection.commit()
+                QMessageBox.information(self, "Success", "Account created successfully")
+
+            except mysql.connector.Error as e:
+                connection.rollback()
+                QMessageBox.critical(self, "Error", f"Error creating account: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+
+    def edit_user(self, user_id):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT p.*, a.username, a.role, a.status
+                    FROM profiles p
+                    JOIN accounts a ON p.user_id = a.user_id
+                    WHERE p.user_id = %s
+                """
+                cursor.execute(query, (user_id,))
+                user = cursor.fetchone()
+
+                if user:
+                    edit_window = QDialog(self)
+                    edit_window.setWindowTitle(f"Edit User: {user['username']}")
+                    layout = QFormLayout()
+
+                    # Username field
+                    username_field = QLineEdit(user['username'])
+                    layout.addRow("Username:", username_field)
+
+                    # Editable fields for names
+                    name_fields = {}
+                    for field in ['first_name', 'middle_name', 'last_name']:
+                        name_fields[field] = QLineEdit(user[field])
+                        layout.addRow(f"{field.replace('_', ' ').title()}:", name_fields[field])
+
+                    # Editable fields for profile data
+                    profile_fields = {
+                        'department': QLineEdit(user['department'] if user['department'] else ""),
+                        'position': QLineEdit(user['position'] if user['position'] else "")
+                    }
+                    for key, field in profile_fields.items():
+                        layout.addRow(f"{key.title()}:", field)
+
+                    # Role dropdown
+                    role_box = QComboBox()
+                    role_box.addItems(["Member", "Executive", "Admin"])
+                    role_box.setCurrentText(user['role'])
+                    layout.addRow("Role:", role_box)
+
+                    # Status dropdown
+                    status_box = QComboBox()
+                    status_box.addItems(["Active", "Inactive"])
+                    status_box.setCurrentText(user['status'])
+                    layout.addRow("Status:", status_box)
+
+                    # Save button
+                    save_btn = QPushButton("Save Changes")
+                    save_btn.clicked.connect(lambda: self.save_user_changes(
+                        user_id,
+                        username_field.text(),
+                        name_fields,
+                        profile_fields,
+                        role_box.currentText(),
+                        status_box.currentText()
+                    ))
+                    layout.addWidget(save_btn)
+
+                    # Reset password button
+                    reset_pass_btn = QPushButton("Reset Password")
+                    reset_pass_btn.clicked.connect(lambda: self.reset_user_password(user_id))
+                    layout.addWidget(reset_pass_btn)
+
+                    # Delete user button
+                    delete_btn = QPushButton("Delete User")
+                    delete_btn.setStyleSheet("color: red")
+                    delete_btn.clicked.connect(lambda: self.delete_user(user_id))
+                    layout.addWidget(delete_btn)
+
+                    # Finalize and show dialog
+                    edit_window.setLayout(layout)
+                    edit_window.exec()
+
+            finally:
+                cursor.close()
+                connection.close()
+
+    def save_user_changes(self, user_id, username, name_fields, profile_fields, role, status):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                connection.start_transaction()
+
+                # Update profiles table
+                profile_query = """
+                    UPDATE profiles 
+                    SET first_name = %s, middle_name = %s, last_name = %s,
+                        department = %s, position = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(profile_query, (
+                    name_fields['first_name'].text().upper(),
+                    name_fields['middle_name'].text().upper(),
+                    name_fields['last_name'].text().upper(),
+                    profile_fields['department'].text().upper(),
+                    profile_fields['position'].text().upper(),
+                    user_id
+                ))
+
+                # Update accounts table
+                account_query = """
+                    UPDATE accounts 
+                    SET username = %s, role = %s, status = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(account_query, (
+                    username,
+                    role,
+                    status,
+                    user_id
+                ))
+
+                connection.commit()
+                QMessageBox.information(self, "Success", "User updated successfully.")
+                self.setup_main_area()
+
+            except mysql.connector.Error as e:
+                connection.rollback()
+                QMessageBox.critical(self, "Error", f"Error updating user: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+
+    def reset_user_password(self, user_id):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Reset Password")
+        layout = QFormLayout()
+
+        # New password field with show/hide toggle
+        new_pass_layout = QHBoxLayout()
+        new_pass = QLineEdit()
+        new_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        new_pass.setPlaceholderText("Enter new password")
+        new_pass_layout.addWidget(new_pass)
+        
+        toggle_new_btn = QPushButton("Show")
+        toggle_new_btn.setFixedWidth(60)
+        toggle_new_btn.clicked.connect(lambda: self.toggle_password_field(new_pass, toggle_new_btn))
+        new_pass_layout.addWidget(toggle_new_btn)
+        layout.addRow("New Password:", new_pass_layout)
+
+        # Password requirements label
+        password_requirements = QLabel(
+            "Password must contain:\n"
+            "- At least 8 characters\n"
+            "- At least one uppercase letter\n"
+            "- At least one lowercase letter\n"
+            "- At least one number\n"
+            "- At least one special character"
+        )
+        password_requirements.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addRow("", password_requirements)
+
+        # Confirm password field with show/hide toggle
+        confirm_pass_layout = QHBoxLayout()
+        confirm_pass = QLineEdit()
+        confirm_pass.setEchoMode(QLineEdit.EchoMode.Password)
+        confirm_pass.setPlaceholderText("Confirm new password")
+        confirm_pass_layout.addWidget(confirm_pass)
+        
+        toggle_confirm_btn = QPushButton("Show")
+        toggle_confirm_btn.setFixedWidth(60)
+        toggle_confirm_btn.clicked.connect(lambda: self.toggle_password_field(confirm_pass, toggle_confirm_btn))
+        confirm_pass_layout.addWidget(toggle_confirm_btn)
+        layout.addRow("Confirm Password:", confirm_pass_layout)
+
+        def apply_reset():
+            # Validate password
+            is_valid, error_message = validate_password(new_pass.text())
+            if not is_valid:
+                QMessageBox.warning(dialog, "Invalid Password", error_message)
+                return
+
+            if new_pass.text() != confirm_pass.text():
+                QMessageBox.warning(dialog, "Mismatch", "Passwords do not match.")
+                return
+
+            hashed_password = bcrypt.hashpw(new_pass.text().encode(), bcrypt.gensalt())
+            connection = connect_to_database(self)
+            if connection:
+                cursor = connection.cursor()
+                cursor.execute("UPDATE accounts SET password = %s WHERE user_id = %s", (hashed_password, user_id))
+                connection.commit()
+                cursor.close()
+                connection.close()
+            QMessageBox.information(dialog, "Success", "Password reset successfully.")
+            dialog.accept()
+
+        save_btn = QPushButton("Reset")
+        save_btn.clicked.connect(apply_reset)
+        layout.addWidget(save_btn)
+
+        dialog.setLayout(layout)
+        dialog.exec()
+
+    def delete_user(self, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Deletion',
+            'Are you sure you want to delete this user? This action cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Delete from profiles first (due to foreign key constraint)
+                    cursor.execute("DELETE FROM confirmation_requests WHERE user_id = %s", (user_id,))
+                    cursor.execute("DELETE FROM profiles WHERE user_id = %s", (user_id,))
+                    cursor.execute("DELETE FROM accounts WHERE user_id = %s", (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "User deleted successfully")
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error deleting user: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def view_pending_registrations(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Role", "Registration Date", "Status", "Actions"
+        ])
+
+        def load_registrations():
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.first_name, p.middle_name, p.last_name,
+                            a.username, a.role, cr.requested_at, a.status, 
+                            cr.request_id, a.user_id
+                        FROM confirmation_requests cr
+                        JOIN accounts a ON cr.user_id = a.user_id
+                        JOIN profiles p ON a.user_id = p.user_id
+                        WHERE cr.request_type = 'Registration'
+                        AND cr.status = 'Pending'
+                        ORDER BY cr.requested_at DESC
+                    """
+                    cursor.execute(query)
+                    registrations = cursor.fetchall()
+                    cursor.execute(query)
+                    registrations = cursor.fetchall()
+
+                    table.setRowCount(len(registrations))
+                    for i, reg in enumerate(registrations):
+                        full_name = f"{reg[0]} {reg[1]} {reg[2]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(reg[3]))
+                        table.setItem(i, 2, QTableWidgetItem(reg[4]))
+                        table.setItem(i, 3, QTableWidgetItem(str(reg[5])))
+                        table.setItem(i, 4, QTableWidgetItem(reg[6]))
+
+                        # Action buttons
+                        actions_widget = QWidget()
+                        actions_layout = QHBoxLayout()
+                        approve_btn = QPushButton("Approve")
+                        reject_btn = QPushButton("Reject")
+
+                        approve_btn.clicked.connect(
+                            lambda checked, rid=reg[7], uid=reg[8]:
+                            self.approve_registration(rid, uid))
+                        reject_btn.clicked.connect(
+                            lambda checked, rid=reg[7], uid=reg[8]:
+                            self.reject_registration(rid, uid))
+
+                        actions_layout.addWidget(approve_btn)
+                        actions_layout.addWidget(reject_btn)
+                        actions_widget.setLayout(actions_layout)
+                        table.setCellWidget(i, 5, actions_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Initial load
+        load_registrations()
+
+        # Add table to layout
+        layout.addWidget(table)
+
+        # Show in main area
+        self.show_table_in_main(container, "Pending Registrations")
+
+    def approve_registration(self, request_id, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Approval',
+            'Are you sure you want to approve this registration request?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # First check if request exists and is pending
+                    cursor.execute("""
+                        SELECT status FROM confirmation_requests 
+                        WHERE request_id = %s AND request_type = 'Registration'
+                    """, (request_id,))
+                    result = cursor.fetchone()
+
+                    if not result or result[0] != 'Pending':
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Update request status
+                    cursor.execute("""
+                        UPDATE confirmation_requests 
+                        SET status = 'Approved'
+                        WHERE request_id = %s
+                    """, (request_id,))
+
+                    # Add record to confirmation_approvals
+                    cursor.execute("""
+                        INSERT INTO confirmation_approvals 
+                        (request_id, approved_by)
+                        VALUES (%s, %s)
+                    """, (request_id, self.user_id))
+
+                    # Activate user account
+                    cursor.execute("""
+                        UPDATE accounts 
+                        SET status = 'Active'
+                        WHERE user_id = %s
+                    """, (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Registration approved")
+                    self.view_pending_registrations()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def reject_registration(self, request_id, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Rejection',
+            'Are you sure you want to reject this registration request?\nThis will delete the pending account.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # First check if request exists and is pending
+                    cursor.execute("""
+                        SELECT status FROM confirmation_requests 
+                        WHERE request_id = %s AND request_type = 'Registration'
+                        AND status = 'Pending'
+                    """, (request_id,))
+                    result = cursor.fetchone()
+
+                    if not result:
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Update confirmation request status
+                    cursor.execute("""
+                        UPDATE confirmation_requests 
+                        SET status = 'Rejected'
+                        WHERE request_id = %s
+                    """, (request_id,))
+
+                    # Add record to confirmation_approvals
+                    cursor.execute("""
+                        INSERT INTO confirmation_approvals 
+                        (request_id, approved_by) 
+                        VALUES (%s, %s)
+                    """, (request_id, self.user_id))
+
+                    # Delete from profiles first (due to foreign key constraint)
+                    cursor.execute("DELETE FROM profiles WHERE user_id = %s", (user_id,))
+
+                    # Delete from confirmation_requests
+                    cursor.execute("DELETE FROM confirmation_requests WHERE user_id = %s", (user_id,))
+
+                    # Finally delete from accounts
+                    cursor.execute("DELETE FROM accounts WHERE user_id = %s", (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Registration rejected and account deleted")
+                    self.view_pending_registrations()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def view_deletion_requests(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Role", "Request Date", "Actions"
+        ])
+
+        def load_requests():
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.first_name, p.middle_name, p.last_name,
+                            a.username, a.role, cr.requested_at, cr.request_id, a.user_id
+                        FROM confirmation_requests cr
+                        JOIN accounts a ON cr.user_id = a.user_id
+                        JOIN profiles p ON a.user_id = p.user_id
+                        WHERE cr.request_type = 'Deletion'
+                        AND cr.status = 'Pending'
+                        ORDER BY cr.requested_at DESC
+                    """
+                    cursor.execute(query)
+                    requests = cursor.fetchall()
+
+                    table.setRowCount(len(requests))
+                    for i, req in enumerate(requests):
+                        full_name = f"{req[0]} {req[1]} {req[2]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(req[3]))
+                        table.setItem(i, 2, QTableWidgetItem(req[4]))
+                        table.setItem(i, 3, QTableWidgetItem(str(req[5])))
+
+                        # Action buttons
+                        actions_widget = QWidget()
+                        actions_layout = QHBoxLayout()
+                        actions_layout.setContentsMargins(0, 0, 0, 0)
+
+                        approve_btn = QPushButton("Approve")
+                        reject_btn = QPushButton("Reject")
+
+                        # Store request_id and user_id in button properties
+                        approve_btn.setProperty("request_id", req[6])
+                        approve_btn.setProperty("user_id", req[7])
+                        reject_btn.setProperty("request_id", req[6])
+
+                        approve_btn.clicked.connect(
+                            lambda checked, btn=approve_btn:
+                            self.approve_deletion(btn.property("request_id"),
+                                                  btn.property("user_id")))
+                        reject_btn.clicked.connect(
+                            lambda checked, btn=reject_btn:
+                            self.reject_deletion(btn.property("request_id")))
+
+                        actions_layout.addWidget(approve_btn)
+                        actions_layout.addWidget(reject_btn)
+                        actions_widget.setLayout(actions_layout)
+                        table.setCellWidget(i, 4, actions_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Initial load
+        load_requests()
+
+        # Add table to layout
+        layout.addWidget(table)
+
+        # Show in main area
+        self.show_table_in_main(container, "Deletion Requests")
+
+    def approve_deletion(self, request_id, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Approval',
+            'Are you sure you want to approve and delete this account?\nThis action cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if request still exists and is pending
+                    cursor.execute("""
+                        SELECT cr.status, a.role, a.user_id
+                        FROM confirmation_requests cr
+                        JOIN accounts a ON cr.user_id = a.user_id
+                        WHERE cr.request_id = %s 
+                        AND cr.request_type = 'Deletion'
+                        AND cr.status = 'Pending'
+                    """, (request_id,))
+
+                    result = cursor.fetchone()
+                    if not result:
+                        connection.rollback()
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Delete in correct order to respect foreign key constraints
+                    # First delete any existing confirmation approvals
+                    cursor.execute("""
+                        DELETE FROM confirmation_approvals 
+                        WHERE approved_by = %s
+                    """, (user_id,))
+
+                    # Then delete confirmation requests where this user is the requester
+                    cursor.execute("""
+                        DELETE FROM confirmation_requests 
+                        WHERE requested_by = %s
+                    """, (user_id,))
+
+                    # Delete confirmation approvals for this request
+                    cursor.execute("DELETE FROM confirmation_approvals WHERE request_id = %s", (request_id,))
+
+                    # Delete the request itself
+                    cursor.execute("DELETE FROM confirmation_requests WHERE request_id = %s", (request_id,))
+
+                    # Delete from profiles
+                    cursor.execute("DELETE FROM profiles WHERE user_id = %s", (user_id,))
+
+                    # Finally delete from accounts
+                    cursor.execute("DELETE FROM accounts WHERE user_id = %s", (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Account deletion request approved and account deleted")
+                    self.view_deletion_requests()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def reject_deletion(self, request_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Rejection',
+            'Are you sure you want to reject this deletion request?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if request still exists and is pending
+                    cursor.execute("""
+                        SELECT status 
+                        FROM confirmation_requests 
+                        WHERE request_id = %s 
+                        AND request_type = 'Deletion'
+                        AND status = 'Pending'
+                    """, (request_id,))
+
+                    if not cursor.fetchone():
+                        connection.rollback()
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Update request status
+                    cursor.execute("""
+                        UPDATE confirmation_requests 
+                        SET status = 'Rejected'
+                        WHERE request_id = %s
+                    """, (request_id,))
+
+                    # Add rejection record
+                    cursor.execute("""
+                        INSERT INTO confirmation_approvals 
+                        (request_id, approved_by) 
+                        VALUES (%s, %s)
+                    """, (request_id, self.user_id))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Deletion request rejected")
+                    self.view_deletion_requests()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def manage_users(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Add search bar layout
+        search_layout = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search by name or username...")
+        search_btn = QPushButton("Search")
+        search_layout.addWidget(search_input)
+        search_layout.addWidget(search_btn)
+        layout.addLayout(search_layout)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Department", "Position", "Status", "Actions"
+        ])
+        layout.addWidget(table)
+
+        def load_users(search_term=""):
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.user_id, p.first_name, p.middle_name, p.last_name,
+                            a.username, p.department, p.position, a.status
+                        FROM profiles p
+                        JOIN accounts a ON p.user_id = a.user_id
+                        WHERE a.role != 'Admin' AND (
+                            CONCAT(p.first_name, ' ', p.middle_name, ' ', p.last_name) LIKE %s
+                            OR a.username LIKE %s
+                        )
+                        ORDER BY p.last_name
+                    """
+                    search_pattern = f"%{search_term}%" if search_term else "%"
+                    cursor.execute(query, (search_pattern, search_pattern))
+                    users = cursor.fetchall()
+
+                    table.setRowCount(len(users))
+                    for i, user in enumerate(users):
+                        user_id = user[0]
+                        full_name = f"{user[1]} {user[2]} {user[3]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(user[4]))
+                        table.setItem(i, 2, QTableWidgetItem(user[5] if user[5] else "Not Set"))
+                        table.setItem(i, 3, QTableWidgetItem(user[6] if user[6] else "Not Set"))
+                        table.setItem(i, 4, QTableWidgetItem(user[7]))
+
+                        # Edit Button
+                        action_widget = QWidget()
+                        action_layout = QHBoxLayout()
+                        action_layout.setContentsMargins(0, 0, 0, 0)
+
+                        edit_btn = QPushButton("Edit")
+                        edit_btn.clicked.connect(lambda _, uid=user_id: self.edit_user_profile(uid))
+
+                        action_layout.addWidget(edit_btn)
+                        action_widget.setLayout(action_layout)
+                        table.setCellWidget(i, 5, action_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Connect search functionality
+        search_btn.clicked.connect(lambda: load_users(search_input.text()))
+
+        # Initial load
+        load_users()
+
+        # Show table in main area
+        self.show_table_in_main(container, "Manage Users")
+
+    def edit_user_profile(self, user_id):
+        # Create container for editing profile
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        form_layout = QFormLayout()
+
+        # Get current profile data
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT p.*, a.username, a.status
+                    FROM profiles p
+                    JOIN accounts a ON p.user_id = a.user_id
+                    WHERE p.user_id = %s
+                """
+                cursor.execute(query, (user_id,))
+                profile = cursor.fetchone()
+
+                if profile:
+                    # Display user's full name and username
+                    full_name = f"{profile['first_name']} {profile['middle_name']} {profile['last_name']}"
+                    form_layout.addRow("Name:", QLabel(full_name))
+                    form_layout.addRow("Username:", QLabel(profile['username']))
+
+                    # Editable fields
+                    department_input = QLineEdit(profile['department'] if profile['department'] else "")
+                    position_input = QLineEdit(profile['position'] if profile['position'] else "")
+
+                    status_box = QComboBox()
+                    status_box.addItems(["Active", "Inactive"])
+                    status_box.setCurrentText(profile['status'])
+
+                    # Add editable fields to layout
+                    form_layout.addRow("Department:", department_input)
+                    form_layout.addRow("Position:", position_input)
+                    form_layout.addRow("Status:", status_box)
+
+                    layout.addLayout(form_layout)
+
+                    # Save button
+                    save_btn = QPushButton("Save Changes")
+                    save_btn.clicked.connect(lambda: self.save_profile_updates(
+                        user_id,
+                        {
+                            'department': department_input,
+                            'position': position_input
+                        },
+                        status_box.currentText()
+                    ))
+                    layout.addWidget(save_btn)
+
+            finally:
+                cursor.close()
+                connection.close()
+
+        # Show in main area
+        self.show_table_in_main(container, "Edit User Profile")
+
+    def save_profile_updates(self, user_id, fields, status):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                # Update profiles for department and position
+                profile_query = """
+                    UPDATE profiles 
+                    SET department = %s, position = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(profile_query, (
+                    fields['department'].text(),
+                    fields['position'].text(),
+                    user_id
+                ))
+
+                # Update accounts for status
+                status_query = """
+                    UPDATE accounts 
+                    SET status = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(status_query, (status, user_id))
+
+                connection.commit()
+                QMessageBox.information(self, "Success", "Profile updated successfully")
+            except mysql.connector.Error as e:
+                QMessageBox.critical(self, "Error", f"Error updating profile: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+
+    def request_deletion(self):
+        reply = QMessageBox.question(
+            self, 'Confirm Deletion Request',
+            'Are you sure you want to request account deletion? This action cannot be undone once approved.\nYou will be logged out after submitting the request.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if there's already a pending deletion request
+                    cursor.execute("""
+                        SELECT request_id FROM confirmation_requests 
+                        WHERE user_id = %s AND request_type = 'Deletion' 
+                        AND status = 'Pending'
+                    """, (self.user_id,))
+
+                    if cursor.fetchone():
+                        QMessageBox.warning(
+                            self, "Request Exists",
+                            "You already have a pending deletion request.")
+                        return
+
+                    # Create new deletion request
+                    cursor.execute("""
+                        INSERT INTO confirmation_requests 
+                        (user_id, request_type, requested_by, status)
+                        VALUES (%s, 'Deletion', %s, 'Pending')
+                    """, (self.user_id, self.user_id))
+
+                    # Update account status to 'Inactive'
+                    cursor.execute("""
+                        UPDATE accounts 
+                        SET status = 'Inactive'
+                        WHERE user_id = %s
+                    """, (self.user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(
+                        self, "Success",
+                        "Deletion request submitted. You will now be logged out.")
+
+                    # Log out the user
+                    self.logout()
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error submitting deletion request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+
+class ExecutiveDashboard(BaseDashboard):
+    def __init__(self, username):
+        super().__init__(username, "Executive")
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle("Executive Dashboard")
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout()
+        central_widget.setLayout(layout)
+
+        welcome_label = QLabel(f"Welcome Executive {self.username}")
+        layout.addWidget(welcome_label)
+
+        # Create menu bar
+        menubar = self.menuBar()
+
+        # Profile Menu
+        profile_menu = menubar.addMenu("Profile")
+        view_profile = profile_menu.addAction("My Profile")
+        view_profile.triggered.connect(self.view_profile)
+
+        edit_menu = profile_menu.addMenu("Edit")
+        edit_account = edit_menu.addAction("Account Settings")
+        edit_account.triggered.connect(lambda: self.edit_account(self.get_profile_id()))
+        edit_information = edit_menu.addAction("Personal Information")
+        edit_information.triggered.connect(lambda: self.edit_information(self.get_profile_id()))
+        # Account Management Menu
+        account_menu = menubar.addMenu("Account Management")
+        pending_reg = account_menu.addAction("Pending Registrations")
+        pending_reg.triggered.connect(self.view_pending_registrations)
+        deletion_req = account_menu.addAction("Deletion Requests")
+        deletion_req.triggered.connect(self.view_deletion_requests)
+
+        # User Management Menu
+        user_menu = menubar.addMenu("User Management")
+        view_users = user_menu.addAction("View Active Users")
+        view_users.triggered.connect(self.view_active_users)
+        manage_profiles = user_menu.addAction("Manage User Profiles")
+        manage_profiles.triggered.connect(self.manage_users)
+
+        # Account Menu
+        account_menu = menubar.addMenu("Account")
+        request_deletion = account_menu.addAction("Request Account Deletion")
+        request_deletion.triggered.connect(self.request_deletion)
+        logout_action = account_menu.addAction("Logout")
+        logout_action.triggered.connect(self.logout)
+
+        self.setup_main_area()
+
+    def view_pending_registrations(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Role", "Registration Date", "Status", "Actions"
+        ])
+
+        def load_registrations():
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.first_name, p.middle_name, p.last_name,
+                            a.username, a.role, cr.requested_at, a.status, 
+                            cr.request_id, a.user_id
+                        FROM confirmation_requests cr
+                        JOIN accounts a ON cr.user_id = a.user_id
+                        JOIN profiles p ON a.user_id = p.user_id
+                        WHERE cr.request_type = 'Registration'
+                        AND cr.status = 'Pending'
+                        ORDER BY cr.requested_at DESC
+                    """
+                    cursor.execute(query)
+                    registrations = cursor.fetchall()
+
+                    table.setRowCount(len(registrations))
+                    for i, reg in enumerate(registrations):
+                        full_name = f"{reg[0]} {reg[1]} {reg[2]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(reg[3]))
+                        table.setItem(i, 2, QTableWidgetItem(reg[4]))
+                        table.setItem(i, 3, QTableWidgetItem(str(reg[5])))
+                        table.setItem(i, 4, QTableWidgetItem(reg[6]))
+
+                        # Action buttons
+                        actions_widget = QWidget()
+                        actions_layout = QHBoxLayout()
+                        approve_btn = QPushButton("Approve")
+                        reject_btn = QPushButton("Reject")
+
+                        approve_btn.clicked.connect(
+                            lambda checked, rid=reg[7], uid=reg[8]:
+                            self.approve_registration(rid, uid))
+                        reject_btn.clicked.connect(
+                            lambda checked, rid=reg[7], uid=reg[8]:
+                            self.reject_registration(rid, uid))
+
+                        actions_layout.addWidget(approve_btn)
+                        actions_layout.addWidget(reject_btn)
+                        actions_widget.setLayout(actions_layout)
+                        table.setCellWidget(i, 5, actions_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Initial load
+        load_registrations()
+
+        # Add table to layout
+        layout.addWidget(table)
+
+        # Show in main area
+        self.show_table_in_main(container, "Pending Registrations")
+
+    def approve_registration(self, request_id, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Approval',
+            'Are you sure you want to approve this registration request?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # First check if request exists and is pending
+                    cursor.execute("""
+                        SELECT status FROM confirmation_requests 
+                        WHERE request_id = %s AND request_type = 'Registration'
+                    """, (request_id,))
+                    result = cursor.fetchone()
+
+                    if not result or result[0] != 'Pending':
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Update request status
+                    cursor.execute("""
+                        UPDATE confirmation_requests 
+                        SET status = 'Approved'
+                        WHERE request_id = %s
+                    """, (request_id,))
+
+                    # Add record to confirmation_approvals
+                    cursor.execute("""
+                        INSERT INTO confirmation_approvals 
+                        (request_id, approved_by)
+                        VALUES (%s, %s)
+                    """, (request_id, self.user_id))
+
+                    # Activate user account
+                    cursor.execute("""
+                        UPDATE accounts 
+                        SET status = 'Active'
+                        WHERE user_id = %s
+                    """, (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Registration approved")
+                    self.view_pending_registrations()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def reject_registration(self, request_id, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Rejection',
+            'Are you sure you want to reject this registration request?\nThis will delete the pending account.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # First check if request exists and is pending
+                    cursor.execute("""
+                        SELECT status FROM confirmation_requests 
+                        WHERE request_id = %s AND request_type = 'Registration'
+                        AND status = 'Pending'
+                    """, (request_id,))
+                    result = cursor.fetchone()
+
+                    if not result:
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Update confirmation request status
+                    cursor.execute("""
+                        UPDATE confirmation_requests 
+                        SET status = 'Rejected'
+                        WHERE request_id = %s
+                    """, (request_id,))
+
+                    # Add record to confirmation_approvals
+                    cursor.execute("""
+                        INSERT INTO confirmation_approvals 
+                        (request_id, approved_by) 
+                        VALUES (%s, %s)
+                    """, (request_id, self.user_id))
+
+                    # Delete from profiles first (due to foreign key constraint)
+                    cursor.execute("DELETE FROM profiles WHERE user_id = %s", (user_id,))
+
+                    # Delete from confirmation_requests
+                    cursor.execute("DELETE FROM confirmation_requests WHERE user_id = %s", (user_id,))
+
+                    # Finally delete from accounts
+                    cursor.execute("DELETE FROM accounts WHERE user_id = %s", (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Registration rejected and account deleted")
+                    self.view_pending_registrations()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def view_deletion_requests(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Role", "Request Date", "Actions"
+        ])
+
+        def load_requests():
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.first_name, p.middle_name, p.last_name,
+                            a.username, a.role, cr.requested_at, cr.request_id, a.user_id
+                        FROM confirmation_requests cr
+                        JOIN accounts a ON cr.user_id = a.user_id
+                        JOIN profiles p ON a.user_id = p.user_id
+                        WHERE cr.request_type = 'Deletion'
+                        AND cr.status = 'Pending'
+                        ORDER BY cr.requested_at DESC
+                    """
+                    cursor.execute(query)
+                    requests = cursor.fetchall()
+
+                    table.setRowCount(len(requests))
+                    for i, req in enumerate(requests):
+                        full_name = f"{req[0]} {req[1]} {req[2]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(req[3]))
+                        table.setItem(i, 2, QTableWidgetItem(req[4]))
+                        table.setItem(i, 3, QTableWidgetItem(str(req[5])))
+
+                        # Action buttons
+                        actions_widget = QWidget()
+                        actions_layout = QHBoxLayout()
+                        actions_layout.setContentsMargins(0, 0, 0, 0)
+
+                        approve_btn = QPushButton("Approve")
+                        reject_btn = QPushButton("Reject")
+
+                        # Store request_id and user_id in button properties
+                        approve_btn.setProperty("request_id", req[6])
+                        approve_btn.setProperty("user_id", req[7])
+                        reject_btn.setProperty("request_id", req[6])
+
+                        approve_btn.clicked.connect(
+                            lambda checked, btn=approve_btn:
+                            self.approve_deletion(btn.property("request_id"),
+                                                  btn.property("user_id")))
+                        reject_btn.clicked.connect(
+                            lambda checked, btn=reject_btn:
+                            self.reject_deletion(btn.property("request_id")))
+
+                        actions_layout.addWidget(approve_btn)
+                        actions_layout.addWidget(reject_btn)
+                        actions_widget.setLayout(actions_layout)
+                        table.setCellWidget(i, 4, actions_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Initial load
+        load_requests()
+
+        # Add table to layout
+        layout.addWidget(table)
+
+        # Show in main area
+        self.show_table_in_main(container, "Deletion Requests")
+
+    def approve_deletion(self, request_id, user_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Approval',
+            'Are you sure you want to approve and delete this account?\nThis action cannot be undone.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if request still exists and is pending
+                    cursor.execute("""
+                        SELECT cr.status, a.role, a.user_id
+                        FROM confirmation_requests cr
+                        JOIN accounts a ON cr.user_id = a.user_id
+                        WHERE cr.request_id = %s 
+                        AND cr.request_type = 'Deletion'
+                        AND cr.status = 'Pending'
+                    """, (request_id,))
+
+                    result = cursor.fetchone()
+                    if not result:
+                        connection.rollback()
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Delete in correct order to respect foreign key constraints
+                    # First delete any existing confirmation approvals
+                    cursor.execute("""
+                        DELETE FROM confirmation_approvals 
+                        WHERE approved_by = %s
+                    """, (user_id,))
+
+                    # Then delete confirmation requests where this user is the requester
+                    cursor.execute("""
+                        DELETE FROM confirmation_requests 
+                        WHERE requested_by = %s
+                    """, (user_id,))
+
+                    # Delete confirmation approvals for this request
+                    cursor.execute("DELETE FROM confirmation_approvals WHERE request_id = %s", (request_id,))
+
+                    # Delete the request itself
+                    cursor.execute("DELETE FROM confirmation_requests WHERE request_id = %s", (request_id,))
+
+                    # Delete from profiles
+                    cursor.execute("DELETE FROM profiles WHERE user_id = %s", (user_id,))
+
+                    # Finally delete from accounts
+                    cursor.execute("DELETE FROM accounts WHERE user_id = %s", (user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Account deletion request approved and account deleted")
+                    self.view_deletion_requests()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def reject_deletion(self, request_id):
+        reply = QMessageBox.question(
+            self, 'Confirm Rejection',
+            'Are you sure you want to reject this deletion request?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No  # Default to No for safety
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if request still exists and is pending
+                    cursor.execute("""
+                        SELECT status 
+                        FROM confirmation_requests 
+                        WHERE request_id = %s 
+                        AND request_type = 'Deletion'
+                        AND status = 'Pending'
+                    """, (request_id,))
+
+                    if not cursor.fetchone():
+                        connection.rollback()
+                        QMessageBox.warning(self, "Error", "Request no longer valid")
+                        return
+
+                    # Update request status
+                    cursor.execute("""
+                        UPDATE confirmation_requests 
+                        SET status = 'Rejected'
+                        WHERE request_id = %s
+                    """, (request_id,))
+
+                    # Add rejection record
+                    cursor.execute("""
+                        INSERT INTO confirmation_approvals 
+                        (request_id, approved_by) 
+                        VALUES (%s, %s)
+                    """, (request_id, self.user_id))
+
+                    connection.commit()
+                    QMessageBox.information(self, "Success", "Deletion request rejected")
+                    self.view_deletion_requests()  # Refresh the view
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error processing request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+    def manage_users(self):
+        # Create container widget
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # Add search bar layout
+        search_layout = QHBoxLayout()
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search by name or username...")
+        search_btn = QPushButton("Search")
+        search_layout.addWidget(search_input)
+        search_layout.addWidget(search_btn)
+        layout.addLayout(search_layout)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "Name", "Username", "Department", "Position", "Status", "Actions"
+        ])
+        layout.addWidget(table)
+
+        def load_users(search_term=""):
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    query = """
+                        SELECT p.user_id, p.first_name, p.middle_name, p.last_name,
+                            a.username, p.department, p.position, a.status
+                        FROM profiles p
+                        JOIN accounts a ON p.user_id = a.user_id
+                        WHERE a.role != 'Admin' AND (
+                            CONCAT(p.first_name, ' ', p.middle_name, ' ', p.last_name) LIKE %s
+                            OR a.username LIKE %s
+                        )
+                        ORDER BY p.last_name
+                    """
+                    search_pattern = f"%{search_term}%" if search_term else "%"
+                    cursor.execute(query, (search_pattern, search_pattern))
+                    users = cursor.fetchall()
+
+                    table.setRowCount(len(users))
+                    for i, user in enumerate(users):
+                        user_id = user[0]
+                        full_name = f"{user[1]} {user[2]} {user[3]}"
+                        table.setItem(i, 0, QTableWidgetItem(full_name))
+                        table.setItem(i, 1, QTableWidgetItem(user[4]))
+                        table.setItem(i, 2, QTableWidgetItem(user[5] if user[5] else "Not Set"))
+                        table.setItem(i, 3, QTableWidgetItem(user[6] if user[6] else "Not Set"))
+                        table.setItem(i, 4, QTableWidgetItem(user[7]))
+
+                        # Edit Button
+                        action_widget = QWidget()
+                        action_layout = QHBoxLayout()
+                        action_layout.setContentsMargins(0, 0, 0, 0)
+
+                        edit_btn = QPushButton("Edit")
+                        edit_btn.clicked.connect(lambda _, uid=user_id: self.edit_user_profile(uid))
+
+                        action_layout.addWidget(edit_btn)
+                        action_widget.setLayout(action_layout)
+                        table.setCellWidget(i, 5, action_widget)
+
+                finally:
+                    cursor.close()
+                    connection.close()
+
+        # Connect search functionality
+        search_btn.clicked.connect(lambda: load_users(search_input.text()))
+
+        # Initial load
+        load_users()
+
+        # Show table in main area
+        self.show_table_in_main(container, "Manage Users")
+
+    def edit_user_profile(self, user_id):
+        # Create container for editing profile
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        form_layout = QFormLayout()
+
+        # Get current profile data
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor(dictionary=True)
+                query = """
+                    SELECT p.*, a.username, a.status
+                    FROM profiles p
+                    JOIN accounts a ON p.user_id = a.user_id
+                    WHERE p.user_id = %s
+                """
+                cursor.execute(query, (user_id,))
+                profile = cursor.fetchone()
+
+                if profile:
+                    # Display user's full name and username
+                    full_name = f"{profile['first_name']} {profile['middle_name']} {profile['last_name']}"
+                    form_layout.addRow("Name:", QLabel(full_name))
+                    form_layout.addRow("Username:", QLabel(profile['username']))
+
+                    # Editable fields
+                    department_input = QLineEdit(profile['department'] if profile['department'] else "")
+                    position_input = QLineEdit(profile['position'] if profile['position'] else "")
+
+                    status_box = QComboBox()
+                    status_box.addItems(["Active", "Inactive"])
+                    status_box.setCurrentText(profile['status'])
+
+                    # Add editable fields to layout
+                    form_layout.addRow("Department:", department_input)
+                    form_layout.addRow("Position:", position_input)
+                    form_layout.addRow("Status:", status_box)
+
+                    layout.addLayout(form_layout)
+
+                    # Save button
+                    save_btn = QPushButton("Save Changes")
+                    save_btn.clicked.connect(lambda: self.save_profile_updates(
+                        user_id,
+                        {
+                            'department': department_input,
+                            'position': position_input
+                        },
+                        status_box.currentText()
+                    ))
+                    layout.addWidget(save_btn)
+
+            finally:
+                cursor.close()
+                connection.close()
+
+        # Show in main area
+        self.show_table_in_main(container, "Edit User Profile")
+
+    def save_profile_updates(self, user_id, fields, status):
+        connection = connect_to_database(self)
+        if connection:
+            try:
+                cursor = connection.cursor()
+                # Update profiles for department and position
+                profile_query = """
+                    UPDATE profiles 
+                    SET department = %s, position = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(profile_query, (
+                    fields['department'].text(),
+                    fields['position'].text(),
+                    user_id
+                ))
+
+                # Update accounts for status
+                status_query = """
+                    UPDATE accounts 
+                    SET status = %s
+                    WHERE user_id = %s
+                """
+                cursor.execute(status_query, (status, user_id))
+
+                connection.commit()
+                QMessageBox.information(self, "Success", "Profile updated successfully")
+            except mysql.connector.Error as e:
+                QMessageBox.critical(self, "Error", f"Error updating profile: {str(e)}")
+            finally:
+                cursor.close()
+                connection.close()
+
+    def request_deletion(self):
+        reply = QMessageBox.question(
+            self, 'Confirm Deletion Request',
+            'Are you sure you want to request account deletion? This action cannot be undone once approved.\nYou will be logged out after submitting the request.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            connection = connect_to_database(self)
+            if connection:
+                try:
+                    cursor = connection.cursor()
+                    connection.start_transaction()
+
+                    # Check if there's already a pending deletion request
+                    cursor.execute("""
+                        SELECT request_id FROM confirmation_requests 
+                        WHERE user_id = %s AND request_type = 'Deletion' 
+                        AND status = 'Pending'
+                    """, (self.user_id,))
+
+                    if cursor.fetchone():
+                        QMessageBox.warning(
+                            self, "Request Exists",
+                            "You already have a pending deletion request.")
+                        return
+
+                    # Create new deletion request
+                    cursor.execute("""
+                        INSERT INTO confirmation_requests 
+                        (user_id, request_type, requested_by, status)
+                        VALUES (%s, 'Deletion', %s, 'Pending')
+                    """, (self.user_id, self.user_id))
+
+                    # Update account status to 'Inactive'
+                    cursor.execute("""
+                        UPDATE accounts 
+                        SET status = 'Inactive'
+                        WHERE user_id = %s
+                    """, (self.user_id,))
+
+                    connection.commit()
+                    QMessageBox.information(
+                        self, "Success",
+                        "Deletion request submitted. You will now be logged out.")
+
+                    # Log out the user
+                    self.logout()
+
+                except mysql.connector.Error as e:
+                    connection.rollback()
+                    QMessageBox.critical(self, "Error", f"Error submitting deletion request: {str(e)}")
+                finally:
+                    cursor.close()
+                    connection.close()
+
+
+class MemberDashboard(BaseDashboard):
+    def __init__(self, username):
+        super().__init__(username, "Member")
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setGeometry(100, 100, 800, 600)
+        self.setWindowTitle("Member Dashboard")
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout()
+        central_widget.setLayout(layout)
+
+        welcome_label = QLabel(f"Welcome Member {self.username}")
+        layout.addWidget(welcome_label)
+
+        # Create menu bar
+        menubar = self.menuBar()
+
+        # Profile Menu
+        profile_menu = menubar.addMenu("Profile")
+        view_profile = profile_menu.addAction("My Profile")
+        view_profile.triggered.connect(self.view_profile)
+
+        edit_menu = profile_menu.addMenu("Edit")
+        edit_account = edit_menu.addAction("Account Settings")
+        edit_account.triggered.connect(lambda: self.edit_account(self.get_profile_id()))
+        edit_information = edit_menu.addAction("Personal Information")
+        edit_information.triggered.connect(lambda: self.edit_information(self.get_profile_id()))
+
+        # Directory Menu
+        directory_menu = menubar.addMenu("Directory")
+        view_members = directory_menu.addAction("View Active Users")
+        view_members.triggered.connect(self.view_active_users)
+
+        # Account Menu
+        account_menu = menubar.addMenu("Account")
+        request_deletion = account_menu.addAction("Request Account Deletion")
+        request_deletion.triggered.connect(self.request_deletion)
+        logout_action = account_menu.addAction("Logout")
+        logout_action.triggered.connect(self.logout)
+
+        self.setup_main_area()
+
+
+# --- Main ---
+if __name__ == '__main__':
+    try:
+        app = QApplication(sys.argv)
+
+        try:
+            window = WelcomeWindow()
+            window.show()
+        except Exception as window_error:
+            print(f"Error creating/showing window: {str(window_error)}")
+            raise
+
+        sys.exit(app.exec())
+    except Exception as e:
+        print(f"Error starting application: {str(e)}")
+        sys.exit(1)
