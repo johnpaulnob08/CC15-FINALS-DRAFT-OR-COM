@@ -157,3 +157,14 @@ UNLOCK TABLES;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
 -- Dump completed on 2025-05-21 17:43:19
+
+
+CREATE TABLE system_logs (
+    log_id INT(11) NOT NULL AUTO_INCREMENT,
+    user_id INT(11) NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    action VARCHAR(100) NOT NULL,
+    details TEXT,
+    status VARCHAR(50),
+    PRIMARY KEY (log_id)
+);
